@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <deque>
 #include <exception>
 #include <fstream>
 #include <iomanip>
@@ -452,6 +453,113 @@ class DonchianBreakoutStrategy : public Strategy {
     }
 };
 
+class ZScoreReversionStrategy : public Strategy {
+  public:
+    std::string id() const override { return "zscore_reversion_v1"; }
+
+    Signal on_candle(const std::string &symbol, SymbolHistory &history, const Candle &candle) override {
+        (void)symbol;
+        (void)candle;
+        const int window = 50;
+        const double entry_z = 1.5;
+        const double exit_z = 0.2;
+        if (static_cast<int>(history.closes.size()) < window + 2) {
+            return {};
+        }
+        int n = static_cast<int>(history.closes.size());
+        double mean_curr = mean_range(history.closes, n - window, window);
+        double std_curr = std_range(history.closes, n - window, window);
+        double mean_prev = mean_range(history.closes, n - window - 1, window);
+        double std_prev = std_range(history.closes, n - window - 1, window);
+        if (std::isnan(mean_curr) || std::isnan(std_curr) || std::isnan(mean_prev) || std::isnan(std_prev)) {
+            return {};
+        }
+        if (std_curr <= 0.0 || std_prev <= 0.0) {
+            return {};
+        }
+        double prev_close = history.closes[n - 2];
+        double z_prev = (prev_close - mean_prev) / std_prev;
+        double z_now = (history.closes.back() - mean_curr) / std_curr;
+        bool crossed_entry = z_prev > -entry_z && z_now <= -entry_z;
+        bool crossed_exit = z_now >= -exit_z;
+        if (crossed_entry) {
+            double confidence = std::min(1.0, std::abs(z_now) / entry_z);
+            return {Action::Buy, confidence};
+        }
+        if (crossed_exit) {
+            return {Action::Exit, 0.5};
+        }
+        return {};
+    }
+};
+
+class KalmanTrendStrategy : public Strategy {
+  public:
+    std::string id() const override { return "kalman_trend_v1"; }
+
+    Signal on_candle(const std::string &symbol, SymbolHistory &history, const Candle &candle) override {
+        (void)history;
+        auto &state = states_[symbol];
+        if (!state.initialized) {
+            state.x = candle.close;
+            state.p = 1.0;
+            state.filtered.clear();
+            state.filtered.push_back(state.x);
+            state.initialized = true;
+            return {};
+        }
+
+        state.p += process_var_;
+        double k = state.p / (state.p + measurement_var_);
+        state.x = state.x + k * (candle.close - state.x);
+        state.p = (1 - k) * state.p;
+        state.filtered.push_back(state.x);
+        if (state.filtered.size() > static_cast<std::size_t>(slope_window_ + 1)) {
+            state.filtered.pop_front();
+        }
+
+        if (state.filtered.size() < static_cast<std::size_t>(slope_window_ + 1) ||
+            history.closes.size() < 2) {
+            return {};
+        }
+
+        double prev_filter = state.filtered[state.filtered.size() - 2];
+        double curr_filter = state.filtered.back();
+        double prev_close = history.closes[history.closes.size() - 2];
+        double curr_close = history.closes.back();
+        double slope = (curr_filter - state.filtered.front()) / slope_window_;
+
+        bool crossed_up =
+            prev_close <= prev_filter * (1 + entry_band_) && curr_close > curr_filter * (1 + entry_band_);
+        bool crossed_down =
+            prev_close >= prev_filter * (1 - exit_band_) && curr_close < curr_filter * (1 - exit_band_);
+
+        if (crossed_up && slope > slope_threshold_) {
+            return {Action::Buy, 0.6};
+        }
+        if (crossed_down || slope < 0) {
+            return {Action::Exit, 0.5};
+        }
+        return {};
+    }
+
+  private:
+    struct KalmanState {
+        bool initialized{false};
+        double x{0.0};
+        double p{1.0};
+        std::deque<double> filtered{};
+    };
+
+    std::unordered_map<std::string, KalmanState> states_;
+    const double process_var_{1e-5};
+    const double measurement_var_{1e-2};
+    const double entry_band_{0.001};
+    const double exit_band_{0.0};
+    const double slope_threshold_{0.0};
+    const int slope_window_{5};
+};
+
 class StrategyFactory {
   public:
     static std::unique_ptr<Strategy> create(const std::string &id) {
@@ -469,6 +577,12 @@ class StrategyFactory {
         }
         if (id == "donchian_breakout_v1") {
             return std::make_unique<DonchianBreakoutStrategy>();
+        }
+        if (id == "zscore_reversion_v1") {
+            return std::make_unique<ZScoreReversionStrategy>();
+        }
+        if (id == "kalman_trend_v1") {
+            return std::make_unique<KalmanTrendStrategy>();
         }
         return nullptr;
     }

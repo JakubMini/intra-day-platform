@@ -130,6 +130,8 @@ class ControlState:
         timeframe: Timeframe,
         compare_timeframes: bool,
         compare_risks: bool,
+        optimize_config: bool,
+        optimize_objective: str,
         risk_fraction: float,
         commission_rate: float,
         max_position: float,
@@ -149,6 +151,8 @@ class ControlState:
         self.timeframe = timeframe
         self.compare_timeframes = compare_timeframes
         self.compare_risks = compare_risks
+        self.optimize_config = optimize_config
+        self.optimize_objective = optimize_objective
         self.risk_fraction = risk_fraction
         self.commission_rate = commission_rate
         self.max_position = max_position
@@ -194,6 +198,13 @@ def _render_sidebar_controls() -> ControlState:
         )
         compare_timeframes = st.toggle("Compare timeframes (5s → 2h)", value=False)
         compare_risks = st.toggle("Compare risk levels (10% steps)", value=False)
+        optimize_config = st.toggle("Auto-optimize config (strategy/risk/timeframe)", value=False)
+        optimize_objective = st.selectbox(
+            "Optimization objective",
+            options=["total_pnl", "sharpe_ratio", "win_rate", "trade_expectancy", "max_drawdown"],
+            index=0,
+            help="Select the metric used to rank configurations.",
+        )
 
         risk_fraction = st.slider(
             "Risk fraction per trade",
@@ -229,6 +240,8 @@ def _render_sidebar_controls() -> ControlState:
         timeframe=timeframe,
         compare_timeframes=compare_timeframes,
         compare_risks=compare_risks,
+        optimize_config=optimize_config,
+        optimize_objective=optimize_objective,
         risk_fraction=risk_fraction,
         commission_rate=commission_rate,
         max_position=max_position,
@@ -288,7 +301,12 @@ def _run_simulation(controls: ControlState):
 
     start_dt, end_dt = _build_market_datetimes(controls.start_date, controls.end_date)
 
-    compare_flags = [controls.compare_all, controls.compare_timeframes, controls.compare_risks]
+    compare_flags = [
+        controls.compare_all,
+        controls.compare_timeframes,
+        controls.compare_risks,
+        controls.optimize_config,
+    ]
     if sum(1 for flag in compare_flags if flag) > 1:
         st.error("Choose only one comparison mode at a time.")
         return None
@@ -418,7 +436,124 @@ def _run_simulation(controls: ControlState):
             "compare_carry": False,
         }
 
-    if selection_engine is not None and not controls.compare_all and not controls.compare_timeframes and not controls.compare_risks:
+    if controls.optimize_config:
+        strategies = IntradayStrategyFactory().available()
+        timeframes = [tf for tf in _timeframe_compare_list() if tf.seconds >= 60]
+        risks = _risk_compare_list()
+        base_candles = _fetch_base_candles(provider, symbols, start_dt, end_dt)
+        if not _has_candles(base_candles):
+            st.error("No intraday candles returned for the selected range.")
+            return None
+
+        analyzer = PerformanceAnalyzer()
+        rows = []
+        total = len(strategies) * len(timeframes) * len(risks)
+        progress = st.progress(0)
+        status = st.empty()
+        completed = 0
+
+        for tf in timeframes:
+            if tf == Timeframe.ONE_MINUTE:
+                candles_tf = base_candles
+            else:
+                candles_tf = {sym: resample_candles(candles, tf) for sym, candles in base_candles.items()}
+            if not _has_candles(candles_tf):
+                continue
+
+            for strategy_id in strategies:
+                strategy_obj = IntradayStrategyFactory().create(strategy_id)
+                for risk in risks:
+                    completed += 1
+                    progress.progress(min(completed / total, 1.0))
+                    status.text(
+                        f"Optimizing: {strategy_id} | {tf.value} | risk {risk:.2f} ({completed}/{total})"
+                    )
+                    if use_native:
+                        try:
+                            result = native_runner.run(
+                                candles_tf,
+                                strategy_id=strategy_id,
+                                commission_rate=controls.commission_rate,
+                                max_position_value=controls.max_position,
+                                risk_fraction=risk,
+                                starting_cash=controls.starting_cash,
+                                max_positions=MAX_STOCKS_PER_DAY,
+                            )
+                        except RuntimeError as exc:
+                            logger.warning("Native engine failed during optimization", extra={"error": str(exc)})
+                            engine = SimulationEngine(
+                                provider=provider,
+                                strategy=strategy_obj,
+                                position_sizer=sizer,
+                                commission_rate=controls.commission_rate,
+                                max_position_value=controls.max_position,
+                                risk_fraction=risk,
+                                starting_cash=controls.starting_cash,
+                            )
+                            result = engine.run_from_candles(candles_tf, fast_mode=controls.fast_mode)
+                    else:
+                        engine = SimulationEngine(
+                            provider=provider,
+                            strategy=strategy_obj,
+                            position_sizer=sizer,
+                            commission_rate=controls.commission_rate,
+                            max_position_value=controls.max_position,
+                            risk_fraction=risk,
+                            starting_cash=controls.starting_cash,
+                        )
+                        result = engine.run_from_candles(candles_tf, fast_mode=controls.fast_mode)
+
+                    report = analyzer.analyze(result)
+                    score = _optimization_score(report.metrics, controls.optimize_objective)
+                    rows.append(
+                        {
+                            "strategy_id": strategy_id,
+                            "timeframe": tf.value,
+                            "risk_fraction": risk,
+                            "score": score,
+                            "total_pnl": report.metrics.get("total_pnl", 0.0),
+                            "sharpe_ratio": report.metrics.get("sharpe_ratio", 0.0),
+                            "win_rate": report.metrics.get("win_rate", 0.0),
+                            "trade_expectancy": report.metrics.get("trade_expectancy", 0.0),
+                            "max_drawdown": report.metrics.get("max_drawdown", 0.0),
+                            "trades": report.metrics.get("trades_count", 0),
+                        }
+                    )
+
+        progress.empty()
+        status.empty()
+
+        if not rows:
+            st.error("Optimization produced no results. Adjust date range or symbols.")
+            return None
+
+        results_df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+        best_row = results_df.iloc[0].to_dict()
+
+        return {
+            "symbols": symbols,
+            "optimization_results": results_df,
+            "best_config": best_row,
+            "objective": controls.optimize_objective,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "provider": provider,
+            "timeframe": controls.timeframe,
+            "strategy_id": controls.strategy_id,
+            "compare_all": False,
+            "compare_timeframes": False,
+            "compare_risks": False,
+            "compare_carry": False,
+            "optimize_config": True,
+        }
+
+    if (
+        selection_engine is not None
+        and not controls.compare_all
+        and not controls.compare_timeframes
+        and not controls.compare_risks
+        and not controls.optimize_config
+    ):
         strategy = IntradayStrategyFactory().create(controls.strategy_id)
         rolling_engine = RollingSelectionSimulationEngine(
             provider=provider,
@@ -602,6 +737,9 @@ def _render_results(bundle: dict, controls: ControlState) -> None:
         return
     if bundle.get("compare_risks"):
         _render_risk_comparison(bundle, controls)
+        return
+    if bundle.get("optimize_config"):
+        _render_optimization(bundle)
         return
 
     report = bundle["report"]
@@ -987,6 +1125,15 @@ def _risk_compare_list() -> list[float]:
     return [round(step / 10, 2) for step in range(1, 11)]
 
 
+def _optimization_score(metrics: dict[str, float], objective: str) -> float:
+    if objective == "max_drawdown":
+        return -abs(metrics.get("max_drawdown", 0.0))
+    value = metrics.get(objective)
+    if value is None:
+        return float("-inf")
+    return float(value)
+
+
 def _fetch_candles_for_timeframe(
     provider: YahooFinanceProvider,
     symbols: list[str],
@@ -1192,13 +1339,21 @@ def _render_risk_comparison(bundle: dict, controls: ControlState) -> None:
     commission_df = pd.DataFrame([report.commission_impact])
     st.dataframe(commission_df, width="stretch", height=120)
 
-    st.markdown("<div class='section-title'>Price Chart</div>", unsafe_allow_html=True)
-    bundle_selected = dict(bundle)
-    bundle_selected["result"] = result
-    _render_price_chart(bundle_selected)
 
-    st.markdown("<div class='section-title'>Exports</div>", unsafe_allow_html=True)
-    _render_exports(report, result)
+def _render_optimization(bundle: dict) -> None:
+    results_df: pd.DataFrame = bundle["optimization_results"]
+    best_config = bundle["best_config"]
+    objective = bundle["objective"]
+
+    st.markdown("<div class='section-title'>Optimization Summary</div>", unsafe_allow_html=True)
+    st.write(f"Objective: `{objective}`")
+    best_df = pd.DataFrame([best_config])
+    st.dataframe(best_df, width="stretch", height=120)
+
+    st.markdown("<div class='section-title'>All Configurations</div>", unsafe_allow_html=True)
+    st.dataframe(results_df, width="stretch", height=420)
+
+    st.info("Run the best configuration separately to view charts and exports.")
 
 
 def _build_signal_diagnostics(
