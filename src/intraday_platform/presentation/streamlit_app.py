@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 import time as time_module
@@ -7,6 +8,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -27,6 +29,7 @@ from intraday_platform.config import (
     MARKET_TIMEZONE,
     MAX_POSITION_GBP,
     MAX_STOCKS_PER_DAY,
+    OPTIMIZATION_MAX_WORKERS,
     RISK_FRACTION_PER_TRADE,
     STARTING_CAPITAL_GBP,
 )
@@ -120,6 +123,7 @@ class ControlState:
     def __init__(
         self,
         run_requested: bool,
+        analysis_mode: str,
         mode: str,
         start_date: date,
         end_date: date,
@@ -141,6 +145,7 @@ class ControlState:
         fast_mode: bool,
     ) -> None:
         self.run_requested = run_requested
+        self.analysis_mode = analysis_mode
         self.mode = mode
         self.start_date = start_date
         self.end_date = end_date
@@ -166,11 +171,25 @@ def _render_sidebar_controls() -> ControlState:
     with st.sidebar:
         st.subheader("Simulation Controls")
 
+        analysis_mode = st.selectbox(
+            "Analysis mode",
+            options=[
+                "Single run",
+                "Compare strategies",
+                "Compare timeframes",
+                "Compare risk levels",
+                "Optimize config",
+            ],
+            help="Pick one analysis type to avoid conflicting settings.",
+        )
+
         mode = st.selectbox(
             "Execution mode",
             options=["Backtest (fast)", "Simulated live playback"],
             help="Simulated live playback replays candles with a short delay.",
         )
+        if analysis_mode != "Single run":
+            mode = "Backtest (fast)"
 
         today = date.today()
         default_start = today - timedelta(days=3)
@@ -187,49 +206,66 @@ def _render_sidebar_controls() -> ControlState:
         strategy_factory = IntradayStrategyFactory()
         strategy_options = strategy_factory.available()
         default_index = strategy_options.index("momentum_vwap_v1") if "momentum_vwap_v1" in strategy_options else 0
-        strategy_id = st.selectbox("Intraday strategy", options=strategy_options, index=default_index)
-        compare_all = st.toggle("Compare all strategies", value=False)
+        strategy_id = strategy_options[default_index]
+        if analysis_mode in {"Single run", "Compare timeframes", "Compare risk levels"}:
+            strategy_id = st.selectbox("Intraday strategy", options=strategy_options, index=default_index)
 
-        timeframe = st.selectbox(
-            "Candle timeframe",
-            options=_timeframe_options(),
-            index=_timeframe_options().index(Timeframe.ONE_MINUTE),
-            format_func=lambda tf: tf.value,
-        )
-        compare_timeframes = st.toggle("Compare timeframes (5s → 2h)", value=False)
-        compare_risks = st.toggle("Compare risk levels (10% steps)", value=False)
-        optimize_config = st.toggle("Auto-optimize config (strategy/risk/timeframe)", value=False)
-        optimize_objective = st.selectbox(
-            "Optimization objective",
-            options=["total_pnl", "sharpe_ratio", "win_rate", "trade_expectancy", "max_drawdown"],
-            index=0,
-            help="Select the metric used to rank configurations.",
-        )
+        compare_all = analysis_mode == "Compare strategies"
 
-        risk_fraction = st.slider(
-            "Risk fraction per trade",
-            min_value=0.01,
-            max_value=1.0,
-            value=RISK_FRACTION_PER_TRADE,
-            step=0.01,
-            format="%.2f",
-        )
-        commission_rate = st.number_input(
-            "Commission rate",
-            value=COMMISSION_RATE,
-            step=0.0001,
-            format="%.4f",
-        )
-        max_position = st.number_input("Max position size (£)", value=MAX_POSITION_GBP, step=1.0)
-        starting_cash = st.number_input("Starting capital (£)", value=STARTING_CAPITAL_GBP, step=10.0)
-        liquidity_filter = st.toggle("Apply liquidity filter", value=True)
-        animate = st.toggle("Animate playback", value=True)
-        fast_mode = st.toggle("Fast mode (skip idle timestamps)", value=True)
+        timeframe = Timeframe.ONE_MINUTE
+        if analysis_mode in {"Single run", "Compare risk levels"}:
+            timeframe = st.selectbox(
+                "Candle timeframe",
+                options=_timeframe_options(),
+                index=_timeframe_options().index(Timeframe.ONE_MINUTE),
+                format_func=lambda tf: tf.value,
+            )
+
+        compare_timeframes = analysis_mode == "Compare timeframes"
+        compare_risks = analysis_mode == "Compare risk levels"
+        optimize_config = analysis_mode == "Optimize config"
+        optimize_objective = "total_pnl"
+        if optimize_config:
+            optimize_objective = st.selectbox(
+                "Optimization objective",
+                options=["total_pnl", "sharpe_ratio", "win_rate", "trade_expectancy", "max_drawdown"],
+                index=0,
+                help="Select the metric used to rank configurations.",
+            )
+
+        risk_fraction = RISK_FRACTION_PER_TRADE
+        if analysis_mode in {"Single run", "Compare timeframes"}:
+            risk_fraction = st.slider(
+                "Risk fraction per trade",
+                min_value=0.01,
+                max_value=1.0,
+                value=RISK_FRACTION_PER_TRADE,
+                step=0.01,
+                format="%.2f",
+            )
+
+        with st.expander("Advanced settings", expanded=False):
+            commission_rate = st.number_input(
+                "Commission rate",
+                value=COMMISSION_RATE,
+                step=0.0001,
+                format="%.4f",
+            )
+            max_position = st.number_input("Max position size (£)", value=MAX_POSITION_GBP, step=1.0)
+            starting_cash = st.number_input("Starting capital (£)", value=STARTING_CAPITAL_GBP, step=10.0)
+            liquidity_filter = st.toggle("Apply liquidity filter", value=True)
+            fast_mode = st.toggle("Fast mode (skip idle timestamps)", value=True)
+            if analysis_mode == "Single run":
+                animate = st.toggle("Animate playback", value=True)
+            else:
+                animate = False
+                st.caption("Animation is only available for single-run mode.")
 
         run_requested = st.button("Run simulation", type="primary")
 
     return ControlState(
         run_requested=run_requested,
+        analysis_mode=analysis_mode,
         mode=mode,
         start_date=start_date,
         end_date=end_date,
@@ -447,78 +483,98 @@ def _run_simulation(controls: ControlState):
 
         analyzer = PerformanceAnalyzer()
         rows = []
-        total = len(strategies) * len(timeframes) * len(risks)
-        progress = st.progress(0)
-        status = st.empty()
-        completed = 0
 
+        candles_by_tf: dict[Timeframe, dict[str, list[Candle]]] = {}
         for tf in timeframes:
             if tf == Timeframe.ONE_MINUTE:
                 candles_tf = base_candles
             else:
                 candles_tf = {sym: resample_candles(candles, tf) for sym, candles in base_candles.items()}
-            if not _has_candles(candles_tf):
-                continue
+            if _has_candles(candles_tf):
+                candles_by_tf[tf] = candles_tf
 
-            for strategy_id in strategies:
+        if not candles_by_tf:
+            st.error("No intraday candles returned for the selected range.")
+            return None
+
+        def _run_config(strategy_id: str, tf: Timeframe, risk: float) -> dict[str, float | str]:
+            candles_tf = candles_by_tf[tf]
+            if use_native:
+                try:
+                    result = native_runner.run(
+                        candles_tf,
+                        strategy_id=strategy_id,
+                        commission_rate=controls.commission_rate,
+                        max_position_value=controls.max_position,
+                        risk_fraction=risk,
+                        starting_cash=controls.starting_cash,
+                        max_positions=MAX_STOCKS_PER_DAY,
+                    )
+                except RuntimeError as exc:
+                    logger.warning("Native engine failed during optimization", extra={"error": str(exc)})
+                    strategy_obj = IntradayStrategyFactory().create(strategy_id)
+                    engine = SimulationEngine(
+                        provider=provider,
+                        strategy=strategy_obj,
+                        position_sizer=sizer,
+                        commission_rate=controls.commission_rate,
+                        max_position_value=controls.max_position,
+                        risk_fraction=risk,
+                        starting_cash=controls.starting_cash,
+                    )
+                    result = engine.run_from_candles(candles_tf, fast_mode=controls.fast_mode)
+            else:
                 strategy_obj = IntradayStrategyFactory().create(strategy_id)
-                for risk in risks:
-                    completed += 1
-                    progress.progress(min(completed / total, 1.0))
-                    status.text(
-                        f"Optimizing: {strategy_id} | {tf.value} | risk {risk:.2f} ({completed}/{total})"
-                    )
-                    if use_native:
-                        try:
-                            result = native_runner.run(
-                                candles_tf,
-                                strategy_id=strategy_id,
-                                commission_rate=controls.commission_rate,
-                                max_position_value=controls.max_position,
-                                risk_fraction=risk,
-                                starting_cash=controls.starting_cash,
-                                max_positions=MAX_STOCKS_PER_DAY,
-                            )
-                        except RuntimeError as exc:
-                            logger.warning("Native engine failed during optimization", extra={"error": str(exc)})
-                            engine = SimulationEngine(
-                                provider=provider,
-                                strategy=strategy_obj,
-                                position_sizer=sizer,
-                                commission_rate=controls.commission_rate,
-                                max_position_value=controls.max_position,
-                                risk_fraction=risk,
-                                starting_cash=controls.starting_cash,
-                            )
-                            result = engine.run_from_candles(candles_tf, fast_mode=controls.fast_mode)
-                    else:
-                        engine = SimulationEngine(
-                            provider=provider,
-                            strategy=strategy_obj,
-                            position_sizer=sizer,
-                            commission_rate=controls.commission_rate,
-                            max_position_value=controls.max_position,
-                            risk_fraction=risk,
-                            starting_cash=controls.starting_cash,
-                        )
-                        result = engine.run_from_candles(candles_tf, fast_mode=controls.fast_mode)
+                engine = SimulationEngine(
+                    provider=provider,
+                    strategy=strategy_obj,
+                    position_sizer=sizer,
+                    commission_rate=controls.commission_rate,
+                    max_position_value=controls.max_position,
+                    risk_fraction=risk,
+                    starting_cash=controls.starting_cash,
+                )
+                result = engine.run_from_candles(candles_tf, fast_mode=controls.fast_mode)
 
-                    report = analyzer.analyze(result)
-                    score = _optimization_score(report.metrics, controls.optimize_objective)
-                    rows.append(
-                        {
-                            "strategy_id": strategy_id,
-                            "timeframe": tf.value,
-                            "risk_fraction": risk,
-                            "score": score,
-                            "total_pnl": report.metrics.get("total_pnl", 0.0),
-                            "sharpe_ratio": report.metrics.get("sharpe_ratio", 0.0),
-                            "win_rate": report.metrics.get("win_rate", 0.0),
-                            "trade_expectancy": report.metrics.get("trade_expectancy", 0.0),
-                            "max_drawdown": report.metrics.get("max_drawdown", 0.0),
-                            "trades": report.metrics.get("trades_count", 0),
-                        }
-                    )
+            report = analyzer.analyze(result)
+            score = _optimization_score(report.metrics, controls.optimize_objective)
+            return {
+                "strategy_id": strategy_id,
+                "timeframe": tf.value,
+                "risk_fraction": risk,
+                "score": score,
+                "total_pnl": report.metrics.get("total_pnl", 0.0),
+                "sharpe_ratio": report.metrics.get("sharpe_ratio", 0.0),
+                "win_rate": report.metrics.get("win_rate", 0.0),
+                "trade_expectancy": report.metrics.get("trade_expectancy", 0.0),
+                "max_drawdown": report.metrics.get("max_drawdown", 0.0),
+                "trades": report.metrics.get("trades_count", 0),
+            }
+
+        tasks: list[tuple[str, Timeframe, float]] = []
+        for tf in candles_by_tf:
+            for strategy_id in strategies:
+                for risk in risks:
+                    tasks.append((strategy_id, tf, risk))
+
+        total = len(tasks)
+        progress = st.progress(0)
+        status = st.empty()
+        completed = 0
+        max_workers = max(1, min(OPTIMIZATION_MAX_WORKERS, total))
+
+        logger.debug("Optimization parallel run", extra={"tasks": total, "workers": max_workers})
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_run_config, sid, tf, risk): (sid, tf, risk) for sid, tf, risk in tasks}
+            for future in as_completed(futures):
+                sid, tf, risk = futures[future]
+                completed += 1
+                progress.progress(min(completed / total, 1.0))
+                status.text(f"Optimizing: {sid} | {tf.value} | risk {risk:.2f} ({completed}/{total})")
+                try:
+                    rows.append(future.result())
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Optimization task failed", extra={"error": str(exc)})
 
         progress.empty()
         status.empty()
@@ -1350,8 +1406,57 @@ def _render_optimization(bundle: dict) -> None:
     best_df = pd.DataFrame([best_config])
     st.dataframe(best_df, width="stretch", height=120)
 
+    st.markdown("<div class='section-title'>Optimization Explorer</div>", unsafe_allow_html=True)
+    df = results_df.copy()
+    timeframes = sorted(df["timeframe"].unique().tolist())
+    strategies = sorted(df["strategy_id"].unique().tolist())
+
+    selected_timeframes = st.multiselect("Timeframes", options=timeframes, default=timeframes)
+    selected_strategies = st.multiselect("Strategies", options=strategies, default=strategies)
+
+    filtered = df[
+        df["timeframe"].isin(selected_timeframes)
+        & df["strategy_id"].isin(selected_strategies)
+    ]
+    if filtered.empty:
+        st.warning("No configurations match the current filters.")
+        return
+
+    scatter = px.scatter(
+        filtered,
+        x="risk_fraction",
+        y="score",
+        color="strategy_id",
+        symbol="timeframe",
+        size="trades",
+        hover_data=["total_pnl", "sharpe_ratio", "win_rate", "trade_expectancy", "max_drawdown"],
+        labels={
+            "risk_fraction": "Risk Fraction",
+            "score": f"Score ({objective})",
+            "strategy_id": "Strategy",
+            "timeframe": "Timeframe",
+        },
+    )
+    scatter.update_layout(
+        template="plotly_dark",
+        legend_title_text="Strategy",
+        height=420,
+    )
+    st.plotly_chart(scatter, width="stretch")
+
+    heat = filtered.groupby(["strategy_id", "timeframe"])["score"].max().reset_index()
+    heat_pivot = heat.pivot(index="strategy_id", columns="timeframe", values="score").fillna(0.0)
+    heatmap = px.imshow(
+        heat_pivot,
+        aspect="auto",
+        color_continuous_scale="Viridis",
+        labels={"color": f"Score ({objective})"},
+    )
+    heatmap.update_layout(template="plotly_dark", height=360)
+    st.plotly_chart(heatmap, width="stretch")
+
     st.markdown("<div class='section-title'>All Configurations</div>", unsafe_allow_html=True)
-    st.dataframe(results_df, width="stretch", height=420)
+    st.dataframe(filtered.sort_values("score", ascending=False), width="stretch", height=420)
 
     st.info("Run the best configuration separately to view charts and exports.")
 

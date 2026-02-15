@@ -10,6 +10,10 @@ from intraday_platform.application.use_cases.intraday_strategies.ema_crossover i
     EmaCrossoverConfig,
     EmaCrossoverStrategy,
 )
+from intraday_platform.application.use_cases.intraday_strategies.hybrid_regime import (
+    HybridRegimeConfig,
+    HybridRegimeStrategy,
+)
 from intraday_platform.application.use_cases.intraday_strategies.kalman_trend import (
     KalmanTrendConfig,
     KalmanTrendStrategy,
@@ -37,6 +41,8 @@ __all__ = [
     "DonchianBreakoutStrategy",
     "EmaCrossoverConfig",
     "EmaCrossoverStrategy",
+    "HybridRegimeConfig",
+    "HybridRegimeStrategy",
     "KalmanTrendConfig",
     "KalmanTrendStrategy",
     "MomentumVwapConfig",

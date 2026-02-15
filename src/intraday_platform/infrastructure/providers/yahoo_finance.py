@@ -51,16 +51,32 @@ def _frame_to_candles(
         return []
     candles: list[Candle] = []
     for index, row in df.iterrows():
+        if pd.isna(row.get("open")) or pd.isna(row.get("high")) or pd.isna(row.get("low")) or pd.isna(row.get("close")):
+            continue
         timestamp = _to_timestamp(index)
+        open_price = float(row["open"]) * price_scale
+        high_price = float(row["high"]) * price_scale
+        low_price = float(row["low"]) * price_scale
+        close_price = float(row["close"]) * price_scale
+        volume = float(row.get("volume", 0.0))
+        if (
+            open_price <= 0
+            or high_price <= 0
+            or low_price <= 0
+            or close_price <= 0
+            or pd.isna(volume)
+            or volume < 0
+        ):
+            continue
         candles.append(
             Candle(
                 symbol=symbol,
                 timestamp=timestamp,
-                open=float(row["open"]) * price_scale,
-                high=float(row["high"]) * price_scale,
-                low=float(row["low"]) * price_scale,
-                close=float(row["close"]) * price_scale,
-                volume=float(row.get("volume", 0.0)),
+                open=open_price,
+                high=high_price,
+                low=low_price,
+                close=close_price,
+                volume=volume,
                 timeframe=timeframe,
                 vwap=float(row["vwap"]) * price_scale if "vwap" in row and pd.notna(row["vwap"]) else None,
             )

@@ -58,9 +58,16 @@ def resample_candles(candles: Sequence[Candle], timeframe: Timeframe) -> list[Ca
     pv = (df["close"] * df["volume"]).resample(rule, label="right", closed="right").sum()
     vwap = (pv / volume.replace(0, np.nan)).ffill().fillna(0.0)
 
-    ohlc["volume"] = volume
+    ohlc["volume"] = volume.fillna(0.0)
     ohlc["vwap"] = vwap
     ohlc = ohlc.dropna(subset=["open", "high", "low", "close"]).reset_index()
+    ohlc = ohlc[
+        (ohlc["open"] > 0)
+        & (ohlc["high"] > 0)
+        & (ohlc["low"] > 0)
+        & (ohlc["close"] > 0)
+        & (ohlc["volume"] >= 0)
+    ]
 
     return [
         Candle(

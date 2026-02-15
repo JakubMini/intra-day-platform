@@ -14,6 +14,10 @@ from intraday_platform.application.use_cases.intraday_strategies.ema_crossover i
     EmaCrossoverConfig,
     EmaCrossoverStrategy,
 )
+from intraday_platform.application.use_cases.intraday_strategies.hybrid_regime import (
+    HybridRegimeConfig,
+    HybridRegimeStrategy,
+)
 from intraday_platform.application.use_cases.intraday_strategies.kalman_trend import (
     KalmanTrendConfig,
     KalmanTrendStrategy,
@@ -49,6 +53,7 @@ class IntradayStrategyFactory:
             DonchianBreakoutStrategy.id: lambda: DonchianBreakoutStrategy(DonchianBreakoutConfig()),
             ZScoreReversionStrategy.id: lambda: ZScoreReversionStrategy(ZScoreReversionConfig()),
             KalmanTrendStrategy.id: lambda: KalmanTrendStrategy(KalmanTrendConfig()),
+            HybridRegimeStrategy.id: lambda: HybridRegimeStrategy(HybridRegimeConfig()),
         }
 
     def available(self) -> list[str]:

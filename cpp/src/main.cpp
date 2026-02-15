@@ -560,6 +560,121 @@ class KalmanTrendStrategy : public Strategy {
     const int slope_window_{5};
 };
 
+class HybridRegimeStrategy : public Strategy {
+  public:
+    std::string id() const override { return "hybrid_regime_v1"; }
+
+    Signal on_candle(const std::string &symbol, SymbolHistory &history, const Candle &candle) override {
+        auto &state = states_[symbol];
+        if (!state.initialized) {
+            state.ema_fast = candle.close;
+            state.ema_slow = candle.close;
+            state.prev_ema_fast = candle.close;
+            state.prev_ema_slow = candle.close;
+            state.initialized = true;
+            return {};
+        }
+
+        const int trend_window = 30;
+        const double trend_threshold = 0.5;
+        const double vwap_threshold = 0.001;
+        const int ema_fast_period = 12;
+        const int ema_slow_period = 26;
+        const int boll_window = 20;
+        const double boll_std = 2.0;
+        const int z_window = 50;
+        const double z_entry = 1.5;
+        const double z_exit = 0.2;
+
+        int min_len = std::max({trend_window + 2, ema_slow_period + 2, boll_window + 2, z_window + 2});
+        if (static_cast<int>(history.closes.size()) < min_len) {
+            return {};
+        }
+
+        state.prev_ema_fast = state.ema_fast;
+        state.prev_ema_slow = state.ema_slow;
+        double alpha_fast = 2.0 / (ema_fast_period + 1.0);
+        double alpha_slow = 2.0 / (ema_slow_period + 1.0);
+        state.ema_fast = alpha_fast * candle.close + (1 - alpha_fast) * state.ema_fast;
+        state.ema_slow = alpha_slow * candle.close + (1 - alpha_slow) * state.ema_slow;
+
+        double vwap_now = history.cum_vol > 0 ? history.cum_pv / history.cum_vol : 0.0;
+        double prev_vol = history.cum_vol - candle.volume;
+        double vwap_prev = prev_vol > 0 ? (history.cum_pv - candle.close * candle.volume) / prev_vol : vwap_now;
+        double prev_close = history.closes[history.closes.size() - 2];
+
+        double mean_ret = 0.0;
+        double std_ret = 0.0;
+        {
+            int start = static_cast<int>(history.closes.size()) - trend_window - 1;
+            if (start < 1) {
+                return {};
+            }
+            std::vector<double> rets;
+            rets.reserve(trend_window);
+            for (int i = start; i < start + trend_window; ++i) {
+                double prev = history.closes[i - 1];
+                double curr = history.closes[i];
+                double r = prev == 0.0 ? 0.0 : (curr / prev - 1.0);
+                rets.push_back(r);
+            }
+            mean_ret = mean_last(rets, trend_window);
+            std_ret = std_last(rets, trend_window);
+        }
+        double trend_score = (std_ret > 0) ? std::abs(mean_ret) / std_ret : 0.0;
+        bool trend_regime = trend_score >= trend_threshold;
+
+        if (trend_regime) {
+            bool crossed_up =
+                prev_close <= vwap_prev * (1 + vwap_threshold) && history.closes.back() > vwap_now * (1 + vwap_threshold);
+            bool crossed_down = prev_close >= vwap_prev && history.closes.back() < vwap_now;
+            bool ema_bull = state.ema_fast > state.ema_slow;
+            bool ema_bear = state.ema_fast < state.ema_slow;
+            bool momentum_positive = history.closes.back() > prev_close;
+            if (crossed_up && ema_bull && momentum_positive) {
+                return {Action::Buy, 0.65};
+            }
+            if (crossed_down || ema_bear) {
+                return {Action::Exit, 0.5};
+            }
+            return {};
+        }
+
+        double sma = mean_last(history.closes, boll_window);
+        double std = std_last(history.closes, boll_window);
+        if (std::isnan(sma) || std::isnan(std) || std <= 0.0) {
+            return {};
+        }
+        double lower = sma - boll_std * std;
+        double z_mean = mean_last(history.closes, z_window);
+        double z_std = std_last(history.closes, z_window);
+        if (std::isnan(z_mean) || std::isnan(z_std) || z_std <= 0.0) {
+            return {};
+        }
+        double z = (history.closes.back() - z_mean) / z_std;
+        bool oversold = history.closes.back() < lower && z <= -z_entry;
+        if (oversold) {
+            double confidence = std::min(1.0, std::abs(z) / z_entry);
+            return {Action::Buy, confidence};
+        }
+        bool reversion = history.closes.back() >= sma || z >= -z_exit;
+        if (reversion) {
+            return {Action::Exit, 0.5};
+        }
+        return {};
+    }
+
+  private:
+    struct HybridState {
+        bool initialized{false};
+        double ema_fast{0.0};
+        double ema_slow{0.0};
+        double prev_ema_fast{0.0};
+        double prev_ema_slow{0.0};
+    };
+    std::unordered_map<std::string, HybridState> states_;
+};
+
 class StrategyFactory {
   public:
     static std::unique_ptr<Strategy> create(const std::string &id) {
@@ -583,6 +698,9 @@ class StrategyFactory {
         }
         if (id == "kalman_trend_v1") {
             return std::make_unique<KalmanTrendStrategy>();
+        }
+        if (id == "hybrid_regime_v1") {
+            return std::make_unique<HybridRegimeStrategy>();
         }
         return nullptr;
     }
