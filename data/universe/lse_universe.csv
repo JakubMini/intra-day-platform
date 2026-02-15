@@ -1,0 +1,21 @@
+symbol,name,exchange,currency,is_active
+AZN.L,AstraZeneca,LSE,GBP,true
+SHEL.L,Shell plc,LSE,GBP,true
+HSBA.L,HSBC Holdings,LSE,GBP,true
+ULVR.L,Unilever,LSE,GBP,true
+BP.L,BP plc,LSE,GBP,true
+GSK.L,GSK plc,LSE,GBP,true
+BARC.L,Barclays,LSE,GBP,true
+LSEG.L,London Stock Exchange Group,LSE,GBP,true
+DGE.L,Diageo,LSE,GBP,true
+RIO.L,Rio Tinto,LSE,GBP,true
+REL.L,RELX,LSE,GBP,true
+NG.L,National Grid,LSE,GBP,true
+VOD.L,Vodafone Group,LSE,GBP,true
+BT-A.L,BT Group,LSE,GBP,true
+PRU.L,Prudential,LSE,GBP,true
+SBRY.L,J Sainsbury,LSE,GBP,true
+ITV.L,ITV plc,LSE,GBP,true
+WPP.L,WPP plc,LSE,GBP,true
+TSCO.L,Tesco,LSE,GBP,true
+HL.L,Hargreaves Lansdown,LSE,GBP,true

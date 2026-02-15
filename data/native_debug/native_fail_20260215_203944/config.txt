@@ -1,0 +1,6 @@
+strategy_id=bollinger_reversion_v1
+commission_rate=0.001
+max_position_value=50.0
+risk_fraction=0.25
+starting_cash=100.0
+max_positions=5

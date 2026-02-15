@@ -3,10 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "minimal_package"
+name = "intraday_platform"
 dynamic = ["version"]
 dependencies = [
-    "pandas"
+    "pandas",
+    "pydantic>=2.5",
+    "yfinance>=0.2.33",
+    "streamlit>=1.30",
+    "plotly>=5.18"
 ]
 
 [project.optional-dependencies]
@@ -20,10 +24,10 @@ prod = [
 ]
 
 [tool.hatch.version]
-path = "src/minimal_package/__init__.py"
+path = "src/intraday_platform/__init__.py"
 
 [project.scripts]
-minimal_package = "minimal_package.app:main"
+intraday_platform = "intraday_platform.app:main"
 
 [tool.pytest.ini_options]
 testpaths = [
