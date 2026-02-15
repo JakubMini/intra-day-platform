@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "minimal_package"
+dynamic = ["version"]
+dependencies = [
+    "pandas"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff"
+]
+
+prod = [
+    "numpy"
+]
+
+[tool.hatch.version]
+path = "src/minimal_package/__init__.py"
+
+[project.scripts]
+minimal_package = "minimal_package.app:main"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests"
+]

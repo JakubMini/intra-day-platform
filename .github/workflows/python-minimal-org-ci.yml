@@ -1,0 +1,121 @@
+name: Python Project CI/CD
+
+# Global anchors (YAML-level, not GH env for `uses:`)
+env:
+  SUBMODULE_DIR: &SUBMODULE_DIR workflow-templates
+  VERSION_ACTION: &VERSION_ACTION ./workflow-templates/actions/version-python
+  FORMATTING_ACTION: &FORMATTING_ACTION ./workflow-templates/actions/clang-format-check
+  TAG_ACTION: &TAG_ACTION ./workflow-templates/actions/tag
+  BUILD_DEPLOY_PYTHON_ACTION: &BUILD_DEPLOY_PYTHON_ACTION ./workflow-templates/actions/build-deploy-python
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  version:
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.ACTIONS_BOT_PAT }}
+          persist-credentials: true
+
+      - name: Compute version
+        id: version
+        uses: *VERSION_ACTION
+        with:
+          base_ref: ${{ github.event.repository.default_branch }}
+          use-codeartifact: "true"
+          aws-region: ${{ secrets.AWS_REGION_CODEARTIFACT }}
+          domain: ${{ secrets.AWS_DOMAIN }}
+          domain-owner-dev: ${{ secrets.AWS_DEV_DOMAIN_OWNER }}
+          repo-dev: ${{ secrets.AWS_PYTHON_REPO_DEV }}
+          role-dev: ${{ secrets.AWS_CODEARTIFACT_PUBLISHER_ROLE }}
+          # optional
+          use-codeartifact-prod: "false"
+
+  formatting:
+    name: Formatting Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Run Ruff
+        run: |
+          pip install ruff 
+          ruff check src/
+
+  tag:
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [version, build-and-deploy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.ACTIONS_BOT_PAT }}
+          persist-credentials: true
+
+      - name: Create tag from computed version
+        uses: *TAG_ACTION
+        with:
+          tag: ${{ needs.version.outputs.tag }}
+  
+  test:
+    needs: [formatting]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          pip install -e .[dev]
+
+      - name: Run tests with pytest
+        run: pytest
+        
+
+  build-and-deploy:
+    permissions:
+      id-token: write   # required for OIDC → assume role
+      contents: read
+    needs: [test, version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.ACTIONS_BOT_PAT }}
+          persist-credentials: true
+
+      - name: Build & Publish (Hatch → CodeArtifact)
+        uses: *BUILD_DEPLOY_PYTHON_ACTION
+        env:
+          AWS_REGION_CODEARTIFACT: ${{ secrets.AWS_REGION_CODEARTIFACT }}
+          AWS_DOMAIN:               ${{ secrets.AWS_DOMAIN }}
+          AWS_DEV_DOMAIN_OWNER:     ${{ secrets.AWS_DEV_DOMAIN_OWNER }}
+          AWS_PYTHON_REPO_DEV:      ${{ secrets.AWS_PYTHON_REPO_DEV }}
+          AWS_PYTHON_REPO_PROD:     ${{ secrets.AWS_PYTHON_REPO_PROD }}
+          AWS_CODEARTIFACT_PUBLISHER: ${{ secrets.AWS_CODEARTIFACT_PUBLISHER_ROLE }}
+        with:
+          # from your existing workflow
+          tag: ${{ needs.version.outputs.tag }}
+          package: ota_service
